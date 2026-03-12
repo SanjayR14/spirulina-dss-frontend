@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { analyzeSite } from "@/api/analysis";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,6 +42,7 @@ import {
   CircleMarker,
   useMapEvents,
 } from "react-leaflet";
+import type { LeafletMouseEvent } from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { jsPDF } from "jspdf";
 import { cn, cleanMarkdownBold } from "@/lib/utils";
@@ -112,7 +113,7 @@ const MapClickHandler: React.FC<{
   onSelect: (coords: Coordinates) => void;
 }> = ({ onSelect }) => {
   useMapEvents({
-    click(e) {
+    click(e: LeafletMouseEvent) {
       onSelect({ lat: e.latlng.lat, lng: e.latlng.lng });
     },
   });
@@ -122,6 +123,33 @@ const MapClickHandler: React.FC<{
 const Dashboard = () => {
   const [locationText, setLocationText] = useState("");
   const [coordinates, setCoordinates] = useState<Coordinates | null>(null);
+
+  // try to parse latitude/longitude from a freeform string; returns null if
+  // not a coordinate pair.  this mirrors the server-side parser so the UI can
+  // provide real-time feedback and keep the map marker in sync when the user
+  // types numeric coords directly.
+  const parseCoords = (text: string): Coordinates | null => {
+    const cleaned = text
+      .replace(/[a-zA-Z]/g, "") // remove letters like Lat,Lng
+      .replace(/:/g, "")
+      .trim();
+    const parts = cleaned.split(/[ ,]+/).filter((p) => p.length > 0);
+    if (parts.length === 2) {
+      const lat = Number(parts[0]);
+      const lng = Number(parts[1]);
+      if (
+        Number.isFinite(lat) &&
+        Number.isFinite(lng) &&
+        lat >= -90 &&
+        lat <= 90 &&
+        lng >= -180 &&
+        lng <= 180
+      ) {
+        return { lat, lng };
+      }
+    }
+    return null;
+  };
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -137,6 +165,20 @@ const Dashboard = () => {
   const [hasRunAnalysis, setHasRunAnalysis] = useState(false);
 
   const hasCoordinates = Boolean(coordinates);
+
+  // whenever the user types a coordinate pair directly, update the map
+  // marker in real-time. This avoids needing to submit or click the map.
+  useEffect(() => {
+    if (!locationText) return;
+
+    const parsed = parseCoords(locationText);
+    if (parsed) {
+      setCoordinates(parsed);
+    }
+    // don't clear coordinates if the text becomes non-coordinates; user may
+    // be typing a place name. Only update when parsing succeeds.
+  }, [locationText]);
+
 
   const extractSiteMetrics = (analysisRoot: any): SiteMetrics | null => {
     const inner = analysisRoot?.analysis ?? analysisRoot ?? {};
@@ -317,9 +359,9 @@ const Dashboard = () => {
     y += 8;
 
     if (siteMetrics) {
-      doc.setFont(undefined, "bold");
+      doc.setFont("helvetica", "bold");
       doc.text("Environmental snapshot", 14, y);
-      doc.setFont(undefined, "normal");
+      doc.setFont("helvetica", "normal");
       y += 6;
 
       const envLines = [
@@ -340,9 +382,9 @@ const Dashboard = () => {
 
     if (proteinPrediction) {
       const useCase = getProteinUseCase(proteinPrediction.level);
-      doc.setFont(undefined, "bold");
+      doc.setFont("helvetica", "bold");
       doc.text("Protein content band", 14, y);
-      doc.setFont(undefined, "normal");
+      doc.setFont("helvetica", "normal");
       y += 6;
 
       const lines = [
@@ -361,9 +403,9 @@ const Dashboard = () => {
 
     const keyPoints = extractKeyPoints(cleanedReport || phdReport);
     if (keyPoints.length) {
-      doc.setFont(undefined, "bold");
+      doc.setFont("helvetica", "bold");
       doc.text("Key technical recommendations", 14, y);
-      doc.setFont(undefined, "normal");
+      doc.setFont("helvetica", "normal");
       y += 6;
 
       keyPoints.forEach((pt) => {
@@ -385,10 +427,13 @@ const Dashboard = () => {
       return;
     }
 
+    // when we already have explicit coordinates from a map click we
+    // don't need to wrap them in extra text – send a clean numeric pair so
+    // that the ML service can geocode/parse it reliably.  the backend
+    // implementation will also detect coordinate strings and bypass
+    // Nominatim if possible.
     const synthesizedLocation = coordinates
-      ? `${locationText || "Selected Site"} (${coordinates.lat.toFixed(
-          3,
-        )}, ${coordinates.lng.toFixed(3)})`
+      ? `${coordinates.lat.toFixed(3)},${coordinates.lng.toFixed(3)}`
       : locationText.trim();
 
     try {
@@ -414,6 +459,14 @@ const Dashboard = () => {
 
       const extractedMetrics = extractSiteMetrics(mlWrapper);
       const extractedProtein = extractProteinPrediction(mlWrapper);
+
+      // coordinate results from the ML service help keep the map marker synced
+      if (mlWrapper.coordinates && mlWrapper.coordinates.lat && mlWrapper.coordinates.lon) {
+        setCoordinates({
+          lat: Number(mlWrapper.coordinates.lat),
+          lng: Number(mlWrapper.coordinates.lon),
+        });
+      }
 
       setSiteMetrics(extractedMetrics);
       setProteinPrediction(extractedProtein);
@@ -564,37 +617,46 @@ const Dashboard = () => {
 
               <div className="mt-2 overflow-hidden rounded-xl border border-emerald-200 bg-slate-50 shadow-inner">
                 <MapContainer
-                  center={[20.5937, 78.9629]}
-                  zoom={4}
-                  className="h-56 w-full"
-                  style={{ backgroundColor: "#ecfdf5" }}
-                  scrollWheelZoom={true}
+                  {...({
+                    center: [20.5937, 78.9629],
+                    zoom: 4,
+                    className: "h-56 w-full",
+                    style: { backgroundColor: "#ecfdf5" },
+                    scrollWheelZoom: true,
+                  } as any)}
                 >
                   <TileLayer
-                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                    {...({
+                      attribution:
+                        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+                      url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                    } as any)}
                   />
 
                   {coordinates && (
                     <CircleMarker
-                      center={[coordinates.lat, coordinates.lng]}
-                      radius={8}
-                      pathOptions={{
-                        color: "#10b981",
-                        fillColor: "#10b981",
-                        fillOpacity: 0.9,
-                      }}
+                      {...({
+                        center: [coordinates.lat, coordinates.lng],
+                        radius: 8,
+                        pathOptions: {
+                          color: "#10b981",
+                          fillColor: "#10b981",
+                          fillOpacity: 0.9,
+                        },
+                      } as any)}
                     />
                   )}
 
                   <MapClickHandler
                     onSelect={(coords) => {
                       setCoordinates(coords);
+                      // if the user hasn't typed anything, prefill the text input
+                      // with a simple comma-separated coordinate pair. we avoid
+                      // the "Lat"/"Lng" prefixes because the backend geocoder
+                      // expects plain numbers (or handles them explicitly).
                       if (!locationText) {
                         setLocationText(
-                          `Lat ${coords.lat.toFixed(3)}, Lng ${coords.lng.toFixed(
-                            3,
-                          )}`,
+                          `${coords.lat.toFixed(3)},${coords.lng.toFixed(3)}`,
                         );
                       }
                     }}
